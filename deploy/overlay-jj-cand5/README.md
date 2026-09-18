@@ -55,14 +55,31 @@ Both files we touch are already ours.
 PUSH=1 ./build.sh                # also push the overlay image to GHCR
 ```
 
+The overlay image is published as
+`ghcr.io/lan-avelino/vllm-jj-overlay:jj-cand5`
+(digest `sha256:e6639e4ec7b4ea15db34de79b8d9351d4a92fe4530900ff89fe8e3100a19c4e6`,
+855 bytes compressed) — public, anonymous pull verified for cand1-cand4.
+
 ## Verify (do this off-peak: every recreate = ~4.3 min downtime)
 
-1. **Markers**
+1. **Markers** — counts are exact (a partially applied overlay changes them).
+   Paths are relative to `/opt/glm53-flash/vllm/` inside the container.
 
 ```bash
-docker exec <container> grep -c "grammar-bitmask warmup" /opt/glm53-flash/vllm/vllm/v1/worker/gpu/structured_outputs_warmup.py   # >= 1
-docker exec <container> grep -c 'Azeus deployment patch' /opt/glm53-flash/vllm/vllm/v1/worker/gpu/structured_outputs.py           # >= 2
-docker exec <container> grep -c b12x_warmup_control /opt/glm53-flash/vllm/vllm/v1/engine/core.py                                   # 0
+docker exec <container> bash -lc '
+  P=/opt/glm53-flash/vllm
+  grep -c num_invalid_spec_tokens $P/vllm/v1/core/sched/output.py               # 2
+  grep -c num_invalid_spec_tokens $P/vllm/v1/core/sched/scheduler.py            # 7
+  grep -c num_invalid_spec_tokens $P/vllm/v1/worker/gpu/model_runner.py         # 1
+  grep -c num_invalid_spec_tokens $P/vllm/v1/worker/gpu/sample/batch_shard.py   # 2
+  grep -c num_invalid_spec_tokens $P/vllm/v1/worker/gpu/structured_outputs.py   # 6
+  grep -c "Azeus deployment patch" $P/vllm/v1/core/sched/scheduler.py           # 1 (liveness guard)
+  grep -c "Azeus deployment patch" $P/vllm/v1/worker/gpu/structured_outputs.py  # 3
+  grep -c "Negative keys mark" $P/vllm/v1/worker/gpu/structured_outputs.py      # 1 (cand4 kernel marker)
+  grep -c "grammar-bitmask warmup" $P/vllm/v1/worker/gpu/structured_outputs_warmup.py   # 3
+  grep -c GRAMMAR_BITMASK_BLOCK_SIZE $P/vllm/v1/worker/gpu/structured_outputs_warmup.py # 4
+  grep -c b12x_warmup_control $P/vllm/v1/engine/core.py                         # 0 (native coupling absent)
+'
 ```
 
 2. **Cold-cache count check (the decisive one)** — expect exactly `2`:
