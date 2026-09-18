@@ -1,9 +1,9 @@
 # Apply the tracked overlay on top of the vendor r38 image.
 #   docker build -f Dockerfile.apply --build-arg OVERLAY=<overlay-img> -t vllm-jj:cand1 .
+# Both ARGs must be declared before the first FROM to be usable in FROM lines.
 ARG OVERLAY=lan-avelino/vllm-jj-overlay:jj-cand1
-FROM ${OVERLAY} AS overlay-src
-
 ARG BASE=localinferencelab/vllm:jovian-judgement-community-20260914-r38
+FROM ${OVERLAY} AS overlay-src
 FROM ${BASE}
 COPY --from=overlay-src /overlay/ /opt/glm53-flash/vllm/
 RUN python -m compileall -q /opt/glm53-flash/vllm/vllm > /dev/null && echo "overlay syntax ok"
