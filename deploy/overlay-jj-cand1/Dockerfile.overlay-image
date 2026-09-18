@@ -1,3 +1,8 @@
 # Tiny publishable overlay image (a few MB): only the post-r38 python files.
 FROM scratch
+LABEL org.opencontainers.image.title="vllm-jj-overlay" \
+      org.opencontainers.image.description="post-r38 python overlay for localinferencelab/vllm r38 (scheduler/worker/engine)" \
+      org.opencontainers.image.source="https://github.com/lan-avelino/vllm-jj" \
+      org.opencontainers.image.revision="8e1f1e587f8d24faf606f334a1c4bdaaa6bd4368" \
+      org.opencontainers.image.base.name="localinferencelab/vllm:jovian-judgement-community-20260914-r38"
 COPY overlay-root/ /overlay/
