@@ -27,6 +27,6 @@ is visible rather than silent.
 ## Verify / roll back
 
     docker run --rm --entrypoint grep vllm-jj:cand2 -c 'Azeus deployment patch' \
-      /opt/glm53-flash/vllm/vllm/v1/core/sched/scheduler.py    # 3 = guard present, 0 = absent
+      /opt/glm53-flash/vllm/vllm/v1/core/sched/scheduler.py    # 1 = guard present, 0 = absent
 
 Rollback = run the vendor base tag again; nothing is mutated in place.
