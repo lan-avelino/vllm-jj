@@ -1,0 +1,11 @@
+ARG OVERLAY=ghcr.io/lan-avelino/vllm-jj-overlay:jj-cand5
+ARG BASE=localinferencelab/vllm:jovian-judgement-community-20260914-r38
+FROM ${OVERLAY} AS overlay-src
+FROM ${BASE}
+COPY --from=overlay-src /overlay/ /opt/glm53-flash/vllm/
+RUN python -m compileall -q /opt/glm53-flash/vllm/vllm > /dev/null && echo "overlay syntax ok"
+LABEL org.opencontainers.image.title="vllm-jj-cand5" \
+      org.opencontainers.image.description="stock r38 + vendor grammar-invalid-draft propagation fix + liveness guard + grammar-bitmask JIT prewarm" \
+      org.opencontainers.image.source="https://github.com/lan-avelino/vllm-jj" \
+      org.opencontainers.image.revision="d96ee2124b895bca1d32ce9bde122653f3ca4e30" \
+      org.opencontainers.image.base.name="localinferencelab/vllm:jovian-judgement-community-20260914-r38"
