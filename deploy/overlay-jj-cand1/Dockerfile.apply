@@ -1,8 +1,11 @@
 # Apply the tracked overlay on top of the vendor r38 image.
-ARG BASE=localinferencelab/vllm:jovian-judgement-community-20260914-r38
+#   docker build -f Dockerfile.apply --build-arg OVERLAY=<overlay-img> -t vllm-jj:cand1 .
 ARG OVERLAY=lan-avelino/vllm-jj-overlay:jj-cand1
+FROM ${OVERLAY} AS overlay-src
+
+ARG BASE=localinferencelab/vllm:jovian-judgement-community-20260914-r38
 FROM ${BASE}
-COPY --from=${OVERLAY} /overlay/ /opt/glm53-flash/vllm/
+COPY --from=overlay-src /overlay/ /opt/glm53-flash/vllm/
 RUN python -m compileall -q /opt/glm53-flash/vllm/vllm > /dev/null && echo "overlay syntax ok"
 LABEL org.opencontainers.image.title="vllm-jj-cand1" \
       org.opencontainers.image.description="r38 + tracked post-r38 python fixes (vendor dev/jovian-judgement)" \
