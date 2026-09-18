@@ -1,0 +1,9 @@
+# Tiny publishable overlay image (a few MB): post-r38 python files + the
+# deployment-custom empty-step liveness guard.
+FROM scratch
+LABEL org.opencontainers.image.title="vllm-jj-overlay" \
+      org.opencontainers.image.description="post-r38 python overlay + custom empty-step liveness guard for localinferencelab/vllm r38" \
+      org.opencontainers.image.source="https://github.com/lan-avelino/vllm-jj" \
+      org.opencontainers.image.revision="f985ddb3537ba808e0854a5cf61ae4866bad3714" \
+      org.opencontainers.image.base.name="localinferencelab/vllm:jovian-judgement-community-20260914-r38"
+COPY overlay-root/ /overlay/
