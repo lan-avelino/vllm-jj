@@ -1,0 +1,11 @@
+# Apply the tracked overlay on top of the vendor r38 image.
+ARG BASE=localinferencelab/vllm:jovian-judgement-community-20260914-r38
+ARG OVERLAY=lan-avelino/vllm-jj-overlay:jj-cand1
+FROM ${BASE}
+COPY --from=${OVERLAY} /overlay/ /opt/glm53-flash/vllm/
+RUN python -m compileall -q /opt/glm53-flash/vllm/vllm > /dev/null && echo "overlay syntax ok"
+LABEL org.opencontainers.image.title="vllm-jj-cand1" \
+      org.opencontainers.image.description="r38 + tracked post-r38 python fixes (vendor dev/jovian-judgement)" \
+      org.opencontainers.image.source="https://github.com/lan-avelino/vllm-jj" \
+      org.opencontainers.image.base.name="localinferencelab/vllm:jovian-judgement-community-20260914-r38" \
+      org.opencontainers.image.revision="8e1f1e587f8d24faf606f334a1c4bdaaa6bd4368"

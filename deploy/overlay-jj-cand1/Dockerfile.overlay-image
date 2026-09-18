@@ -1,0 +1,3 @@
+# Tiny publishable overlay image (a few MB): only the post-r38 python files.
+FROM scratch
+COPY overlay-root/ /overlay/
