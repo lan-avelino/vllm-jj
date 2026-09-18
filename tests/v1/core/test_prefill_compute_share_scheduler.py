@@ -1205,3 +1205,58 @@ def test_prefill_fairness_hot_switch_is_atomic(opt_model_path):
     unchanged = scheduler.get_prefill_fairness()
     assert unchanged["prefill_compute_share"] == "auto"
     assert unchanged["prefill_compute_half_life"] == "responsive"
+
+
+def test_empty_step_liveness_guard_forces_progress(opt_model_path):
+    """Deployment regression: never return an empty step while work is runnable.
+
+    Reproduces the empty-step class observed on the DS4.1 deployment
+    (2026-09-18): the prefill-interleave controller holds its lanes on requests
+    that no pass can schedule, so every pass skips all running prefills and the
+    engine returns empty steps forever - Running pinned, Waiting growing, GPUs
+    idle, /health still 200. The deployment liveness guard must force progress.
+    """
+    scheduler = _create_interleaving_scheduler(
+        opt_model_path,
+        max_parallel_prefills=2,
+        max_num_batched_tokens=16,
+        max_model_len=256,
+    )
+    for request in create_requests(
+        num_requests=2, num_tokens=64, req_ids=["wedge-a", "wedge-b"]
+    ):
+        scheduler.add_request(request)
+
+    first = scheduler.schedule()
+    assert sum(first.num_scheduled_tokens.values()) > 0
+    _update(scheduler, first)
+    assert scheduler.running
+    assert all(request.is_prefill_chunk for request in scheduler.running)
+
+    class _ClosedLanes:
+        """Interleave step whose lanes can never be scheduled."""
+
+        def is_selected(self, request_id: str) -> bool:
+            return False
+
+        def token_budget(self, total_token_budget: int, scheduled: set[str]) -> int:
+            return 0
+
+        def mark_unavailable(self, request_id: str) -> None:
+            pass
+
+        def release(self, request_id: str) -> None:
+            pass
+
+        def select_waiting_request(self, queues):
+            return None
+
+    scheduler.prefill_interleave_controller.begin_step = lambda **kwargs: (
+        _ClosedLanes()
+    )
+
+    for step in range(3):
+        output = scheduler.schedule()
+        scheduled = sum(output.num_scheduled_tokens.values())
+        assert scheduled > 0, f"empty step {step} while work was runnable"
+        _update(scheduler, output)
