@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the Azeus grammar-bitmask JIT warmup (deploy/jj-cand5).
 
-CPU-only: the kernel is replaced by a recorder, so these run anywhere torch is
-importable. The variant matrix itself is documented in
+No GPU compute is used — the kernel is replaced by a recorder — but importing
+the worker package loads ``@triton.jit`` modules, so an active driver is
+required; the module skips on CPU-only hosts (measured: 7 passed with a driver,
+`TypeError: 'NoneType' object is not callable` from the Triton stub without
+one). The variant matrix is documented in
 ``deploy/overlay-jj-cand5/WARMUP-MATRIX.md``.
 """
 
@@ -14,6 +17,12 @@ import torch
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.gpu import structured_outputs_warmup as warmup_mod
+
+if not torch.cuda.is_available():  # pragma: no cover - GPU runners only
+    pytest.skip(
+        "needs an active driver: the import chain loads @triton.jit modules",
+        allow_module_level=True,
+    )
 
 # DeepSeek-V4.1-like: divisible by 16, while cdiv(vocab, 32) is not.
 VOCAB_SIZE = 129280

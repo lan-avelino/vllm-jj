@@ -57,8 +57,14 @@ PUSH=1 ./build.sh                # also push the overlay image to GHCR
 
 The overlay image is published as
 `ghcr.io/lan-avelino/vllm-jj-overlay:jj-cand5`
-(digest `sha256:e6639e4ec7b4ea15db34de79b8d9351d4a92fe4530900ff89fe8e3100a19c4e6`,
+(digest `sha256:65443e2ab92287e52dd408519da419c2e408f7c48a0cb1bae5fefa6029952efb`,
 855 bytes compressed) — public, anonymous pull verified for cand1-cand4.
+
+> **Build it on an amd64 host** (or `docker buildx --platform linux/amd64`).
+> Building this overlay on an arm64 Mac yields an arm64-only manifest, and an
+> amd64 host then fails with `no match for platform in manifest: not found` even
+> though the layer contents are correct — so verify the *platform*, not just the
+> files. (Measured 2026-09-18: Mac build = arm64, rebuilt on the GPU host = amd64.)
 
 ## Verify (do this off-peak: every recreate = ~4.3 min downtime)
 
@@ -78,17 +84,23 @@ docker exec <container> bash -lc '
   grep -c "Negative keys mark" $P/vllm/v1/worker/gpu/structured_outputs.py      # 1 (cand4 kernel marker)
   grep -c "grammar-bitmask warmup" $P/vllm/v1/worker/gpu/structured_outputs_warmup.py   # 3
   grep -c GRAMMAR_BITMASK_BLOCK_SIZE $P/vllm/v1/worker/gpu/structured_outputs_warmup.py # 4
+  grep -c GRAMMAR_BITMASK_BLOCK_SIZE $P/vllm/v1/worker/gpu/structured_outputs.py        # 2 (definition + use)
   grep -c b12x_warmup_control $P/vllm/v1/engine/core.py                         # 0 (native coupling absent)
 '
 ```
 
-2. **Cold-cache count check (the decisive one)** — expect exactly `2`:
+2. **Cold-cache count check (the decisive one)** — expect exactly `4`:
+   2 pointer variants (common path / invalid-draft path) × 2 warmup dtypes
+   (bf16, fp16 — the dtype is part of the Triton signature). Measured
+   2026-09-18: 4 variant dirs, **all four** of them grammar-kernel variants
+   (nothing else is compiled), 1.25 s.
 
 ```bash
 docker run --rm --gpus all --entrypoint bash <full-image> -lc '
   export TRITON_CACHE_DIR=/tmp/cold-warmup
   python3 -c "import torch; from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker as W; W(8, 129280, torch.device(\"cuda\"), 8, 1)"
-  find /tmp/cold-warmup -name "*_apply_grammar_bitmask_kernel.ttgir" | wc -l'
+  find /tmp/cold-warmup -name "*.ttgir" | wc -l                                  # 4
+  find /tmp/cold-warmup -name "*_apply_grammar_bitmask_kernel.ttgir" | wc -l      # 4'
 ```
 
 3. **Startup log** — one line per worker process:

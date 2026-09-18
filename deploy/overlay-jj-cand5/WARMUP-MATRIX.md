@@ -72,10 +72,16 @@ Consequences:
 | 1 | `input_ids_ptr=None`, `input_logits_indices_ptr=None` | launch-based on the worker's real buffers (`logits_indices`, `grammar_bitmask`) + compile-only aligned descriptors | covers every ordinary tool/json request |
 | 2 | both pointers **present** (invalid-draft path) | launch-based call with real tensors | reached only when a grammar terminates mid-draft (the cand4 fix path) |
 
-**Predicted variant count N = 2.** Scalar classes and pointer alignment add no
-further rows. Verification (step 3) must produce exactly N compile dirs from a
-cold `TRITON_CACHE_DIR`, then show zero monitor events under
-`--jit-monitor-mode error`.
+**Logical variant count N = 2.** Scalar classes and pointer alignment add no
+further rows. The warmup runs each logical variant once per dtype it warms
+(bf16 and fp16), and the dtype is part of the Triton signature, so a cold cache
+must contain **4** compile dirs — 2 per dtype. Verification (step 3) must produce
+exactly those 4, then show zero monitor events under `--jit-monitor-mode error`.
+
+**Measured 2026-09-18 (cand5 image, cold `TRITON_CACHE_DIR`):** 4 variant dirs,
+all four grammar-kernel variants and nothing else, 1.25 s, with the startup line
+`grammar-bitmask warmup: compiled 4 variant(s) in 1.25s (dtypes=['bfloat16',
+'float16'], vocab_size=129280, mask_stride=8)`.
 
 ## 6. Distribution consequence (urgent, independent of cand5)
 
