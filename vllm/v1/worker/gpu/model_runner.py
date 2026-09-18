@@ -1554,6 +1554,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
+                grammar_output.num_invalid_spec_tokens,
             )
 
         sampler_output: SamplerOutput | None

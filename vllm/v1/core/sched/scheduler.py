@@ -894,6 +894,7 @@ class Scheduler(SchedulerInterface):
             *,
             allow_preemption: bool = True,
             enforce_lora_limit: bool = False,
+            force: bool = False,
         ) -> None:
             nonlocal draft_input_budget
             nonlocal encoder_compute_budget
@@ -953,15 +954,18 @@ class Scheduler(SchedulerInterface):
                     req_index += 1
                     continue
 
+                # [Azeus] force=True is the liveness escape hatch below: it
+                # must not depend on lane selection or deferral state.
                 if (
-                    request.is_prefill_chunk
+                    not force
+                    and request.is_prefill_chunk
                     and prefill_interleave_step is not None
                     and not prefill_interleave_step.is_selected(request.request_id)
                 ):
                     req_index += 1
                     continue
 
-                if defer_prefills and request.is_prefill_chunk:
+                if not force and defer_prefills and request.is_prefill_chunk:
                     # Defer this in-progress chunk to a cadence-aligned step;
                     # decodes still run to fill this step.
                     req_index += 1
@@ -978,7 +982,11 @@ class Scheduler(SchedulerInterface):
                     < num_new_tokens
                 ):
                     num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-                if request.is_prefill_chunk and prefill_interleave_step is not None:
+                if (
+                    not force
+                    and request.is_prefill_chunk
+                    and prefill_interleave_step is not None
+                ):
                     num_new_tokens = min(
                         num_new_tokens,
                         prefill_interleave_step.token_budget(
@@ -1813,6 +1821,74 @@ class Scheduler(SchedulerInterface):
                 enforce_lora_limit=True,
             )
 
+        # [Azeus deployment patch] Liveness: never return an empty step while
+        # runnable work exists. Every pass above can be filtered away - by the
+        # service-class filter, prefill-interleave lane selection, deferred
+        # prefills, the async cadence gates or a zero interleave token budget -
+        # and a closed gate that no pass reopens is self-sustaining: the engine
+        # spins on empty steps while Running stays pinned, Waiting grows, the
+        # GPUs idle and /health still returns 200 (observed on this deployment
+        # 2026-09-18). Force one un-gated running pass; if even that produces no
+        # work, log the gate state so the next occurrence is diagnosable.
+        if not num_scheduled_tokens and (self.running or self.waiting):
+            was_defer_prefills = defer_prefills
+            was_legacy_defer = legacy_defer_prefills
+            was_adaptive_defer = adaptive_defer_prefills
+            adaptive_defer_prefills = False
+            defer_prefills = False
+            schedule_running_requests(
+                selected_compute_class, allow_preemption=False, force=True
+            )
+            if not num_scheduled_tokens:
+                schedule_running_requests(None, allow_preemption=False, force=True)
+            if not num_scheduled_tokens:
+                blocked_lane = sum(
+                    1
+                    for request in self.running
+                    if request.is_prefill_chunk
+                    and prefill_interleave_step is not None
+                    and not prefill_interleave_step.is_selected(request.request_id)
+                )
+                blocked_cadence = sum(
+                    1
+                    for request in self.running
+                    if self.current_step < request.next_decode_eligible_step
+                )
+                blocked_max_tokens = sum(
+                    1
+                    for request in self.running
+                    if request.num_output_placeholders > 0
+                    and request.num_computed_tokens
+                    + 2
+                    - request.num_output_placeholders
+                    >= request.num_prompt_tokens + request.max_tokens
+                )
+                self._empty_step_warning_count = (
+                    getattr(self, "_empty_step_warning_count", 0) + 1
+                )
+                if (
+                    self._empty_step_warning_count <= 3
+                    or self._empty_step_warning_count % 100 == 0
+                ):
+                    logger.warning(
+                        "empty scheduler step with runnable work (#%d): running=%d "
+                        "waiting=%d defer=%s legacy_defer=%s adaptive_defer=%s "
+                        "class=%s contention=%s token_budget=%d blocked_lane=%d "
+                        "blocked_cadence=%d blocked_max_tokens=%d",
+                        self._empty_step_warning_count,
+                        len(self.running),
+                        len(self.waiting),
+                        was_defer_prefills,
+                        was_legacy_defer,
+                        was_adaptive_defer,
+                        selected_compute_class,
+                        compute_contention,
+                        token_budget,
+                        blocked_lane,
+                        blocked_cadence,
+                        blocked_max_tokens,
+                    )
+
         if scheduled_prefill_req_ids:
             self.prefill_interleave_controller.record_scheduled(
                 scheduled_prefill_req_ids, self.current_step
@@ -2595,7 +2671,11 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduler_output.scheduled_spec_decode_tokens,
         )
-        return GrammarOutput(structured_output_request_ids, bitmask)
+        return GrammarOutput(
+            structured_output_request_ids,
+            bitmask,
+            scheduler_output.num_invalid_spec_tokens,
+        )
 
     def update_from_output(
         self,
@@ -2720,7 +2800,13 @@ class Scheduler(SchedulerInterface):
                     )
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
-                assert num_accepted <= num_draft_tokens
+                assert num_accepted <= num_draft_tokens, (
+                    f"{req_id}: accepted={num_accepted}, "
+                    f"valid_drafts={num_draft_tokens}, "
+                    f"scheduled_drafts={num_scheduled_draft_tokens}, "
+                    f"grammar_invalid="
+                    f"{(scheduler_output.num_invalid_spec_tokens or {}).get(req_id, 0)}"
+                )
                 # Every unaccepted scheduler placeholder must be rolled back,
                 # including drafts omitted by adaptive verification.
                 num_rejected = num_scheduled_draft_tokens - num_accepted
