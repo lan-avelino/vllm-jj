@@ -3,11 +3,19 @@
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+logger = init_logger(__name__)
+
+# Azeus deployment patch: module-level constexpr so the JIT warmup helper
+# (vllm/v1/worker/gpu/structured_outputs_warmup.py) and the kernel launch below
+# cannot drift apart.
+GRAMMAR_BITMASK_BLOCK_SIZE = 8192
 
 
 def _build_grammar_mapping(
@@ -61,6 +69,24 @@ class StructuredOutputsWorker:
         self.copy_stream = torch.cuda.Stream()
         self.mask_stride = mask_stride
         self.num_bonus_tokens = num_bonus_tokens
+        # Azeus deployment patch: kept so the warmup helper can reproduce the
+        # exact vocabs_size/logits-stride specialization class.
+        self.vocab_size = vocab_size
+
+        # Azeus deployment patch: compile the grammar-bitmask kernel variants now,
+        # while the Triton JIT monitor is still inactive (it is activated after
+        # warmup, and this deployment runs it in `error` mode, where a compile
+        # during inference raises and kills the engine). Rationale and variant
+        # matrix: vllm/v1/worker/gpu/structured_outputs_warmup.py and
+        # deploy/overlay-jj-cand5/WARMUP-MATRIX.md.
+        try:
+            from vllm.v1.worker.gpu.structured_outputs_warmup import (
+                warmup_grammar_bitmask,
+            )
+
+            warmup_grammar_bitmask(self)
+        except Exception:  # noqa: BLE001 - warmup must never block startup
+            logger.exception("grammar-bitmask warmup could not be imported/run")
 
     def apply_grammar_bitmask(
         self,
@@ -109,7 +135,7 @@ class StructuredOutputsWorker:
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)
         vocab_size = logits.shape[-1]
-        BLOCK_SIZE = 8192
+        BLOCK_SIZE = GRAMMAR_BITMASK_BLOCK_SIZE
         grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
         _apply_grammar_bitmask_kernel[grid](
             logits,
