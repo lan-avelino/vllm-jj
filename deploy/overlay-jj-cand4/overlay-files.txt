@@ -1,0 +1,5 @@
+vllm/v1/core/sched/output.py
+vllm/v1/core/sched/scheduler.py
+vllm/v1/worker/gpu/model_runner.py
+vllm/v1/worker/gpu/sample/batch_shard.py
+vllm/v1/worker/gpu/structured_outputs.py
