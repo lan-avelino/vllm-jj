@@ -100,7 +100,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
     init_kv_cache,
 )
-from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.block_table import BlockTables, slot_mapping_mode
 from vllm.v1.worker.gpu.boundary_checkpoint import BoundaryCheckpointState
 from vllm.v1.worker.gpu.buffer_utils import (
     set_default_max_concurrency,
@@ -617,6 +617,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
+        slot_mapping_circular = []
         group_cp_sizes = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
@@ -624,7 +625,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             layer_spec = (
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
-            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            mapping_enabled, mapping_circular = slot_mapping_mode(layer_spec)
+            slot_mapping_enabled.append(mapping_enabled)
+            slot_mapping_circular.append(mapping_circular)
             group_cp_sizes.append(
                 1 if getattr(layer_spec, "dcp_replicated", False) else self.dcp_size
             )
@@ -707,6 +710,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_enabled=slot_mapping_enabled,
+            slot_mapping_circular=slot_mapping_circular,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
