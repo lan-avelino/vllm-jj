@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import TYPE_CHECKING
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -24,6 +26,10 @@ from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from .b12x_pcie_all_reduce import B12xPcieAllReduce
+    from .b12x_roce_all_reduce import B12xRoceAllReduce
 
 
 # PyNCCL communicators shared by groups over the same ranks and device
@@ -73,6 +79,8 @@ def _release_pynccl(comm, key: tuple | None) -> None:
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
+    b12x_ar_comm: "B12xPcieAllReduce | B12xRoceAllReduce | None"
+
     def __init__(
         self,
         cpu_group: ProcessGroup,
@@ -503,6 +511,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
+    def all_reduce_in_place(self, input_: torch.Tensor) -> torch.Tensor:
+        """Use NCCL's aliasing contract for a caller-donated intermediate."""
+        pynccl_comm = self.pynccl_comm
+        if (
+            pynccl_comm is None
+            or pynccl_comm.disabled
+            or pynccl_comm.all_reduce(input_, out_tensor=input_) is None
+        ):
+            torch.distributed.all_reduce(input_, group=self.device_group)
+        return input_
+
     def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
         ca_comm = self.ca_comm
         if ca_comm is None:
@@ -525,13 +544,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # RoCEnante all-gather (writes the concatenated
         # layout directly, so no reshape/copy follows).
         b12x_ar_comm = self.b12x_ar_comm
+        should_all_gather = getattr(b12x_ar_comm, "should_all_gather", None)
+        all_gather = getattr(b12x_ar_comm, "all_gather", None)
         if (
             b12x_ar_comm is not None
             and not b12x_ar_comm.disabled
-            and getattr(b12x_ar_comm, "should_all_gather", None) is not None
-            and b12x_ar_comm.should_all_gather(input_, dim)
+            and should_all_gather is not None
+            and should_all_gather(input_, dim)
         ):
-            return b12x_ar_comm.all_gather(input_, dim)
+            assert all_gather is not None
+            return all_gather(input_, dim)
         if dim == 0 and should_nccl_symm_mem_ag_rs():
             return self._all_gather_symm_mem(input_.contiguous())
 
@@ -765,6 +787,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             raise ValueError("No PyNCCL communicator found")
 
     def destroy(self):
+        for transport in getattr(self, "b12x_dcp_transports", {}).values():
+            transport.close()
+        self.b12x_dcp_transports = {}
         if self.b12x_ar_comm is not None:
             self.b12x_ar_comm.close()
             self.b12x_ar_comm = None
