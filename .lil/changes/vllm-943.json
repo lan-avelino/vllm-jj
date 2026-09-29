@@ -1,0 +1,15 @@
+{
+  "schema": "local-inference-release-change/v1",
+  "id": "vllm-943",
+  "category": "fix",
+  "summary": "DeepSeek-V4.1 decode no longer drifts from the model as generation lengthens: the complete compressor-ring fix from vllm #926",
+  "models": ["DeepSeek-V4.1-Flash"],
+  "compatibility": "No user action required. Supersedes the vllm-933 note: that measurement covered only the first half of #926, which cannot run on its own.",
+  "details": [
+    "Circular-buffer KV groups now get a worker slot mapping, so DeepSeek-V4.1 writes its compressor state ring for every real decode row.",
+    "8 prompts x 2,048 greedy tokens on RTX PRO 6000: KL(prefill||decode) at decode steps 1536-2048 fell from 0.156 to 0.018 and top-1 agreement rose from 0.92 to 0.97. Divergence now stays flat with length. Decode speed, DSpark acceptance and KV size are unchanged."
+  ],
+  "authors": ["MadeBy561"],
+  "pull_requests": [943, 926],
+  "requires": []
+}
