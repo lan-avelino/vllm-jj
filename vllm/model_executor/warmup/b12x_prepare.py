@@ -599,6 +599,14 @@ class B12xPreparedBatch:
 
     def release(self) -> None:
         plans, self.plans = self.plans, ()
+        if not plans:
+            return
+        # B12X reclaims unused programs and collects garbage after each release
+        # call; per-plan releases repeat that for every plan of the batch.
+        release_many = getattr(self.session, "release_many", None)
+        if release_many is not None:
+            release_many(plans)
+            return
         with ExitStack() as stack:
             for plan in plans:
                 stack.callback(self.session.release, plan)
