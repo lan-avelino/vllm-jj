@@ -771,6 +771,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
         self.num_redundant_experts = eplb_config.num_redundant_experts
+        self._pending_fp8_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
 
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
@@ -901,8 +902,8 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         expert_params_mapping = self.get_expert_mapping()
         # Pro-format fused qkv_proj arrives as two tensors (weight and
         # weight_scale_inv). Store them per-layer so that they can be
-        # sharded together.
-        pending_fp8_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
+        # sharded together across AutoWeightsLoader's separate module groups.
+        pending_fp8_qkv_proj = self._pending_fp8_qkv_proj
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
