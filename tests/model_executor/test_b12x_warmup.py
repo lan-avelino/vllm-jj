@@ -345,6 +345,19 @@ def test_tuning_pool_teardown_releases_all_plans_even_on_failure(monkeypatch, fa
     assert released == ["second", "first", "pool"]
 
 
+def test_prepared_batch_releases_all_plans_in_one_session_call() -> None:
+    """Program reclamation runs once per batch, not once per released plan."""
+    calls = []
+    session = SimpleNamespace(
+        release=lambda plan: calls.append(("release", plan)),
+        release_many=lambda plans: calls.append(("release_many", tuple(plans))),
+    )
+    batch = b12x_prepare.B12xPreparedBatch(session, ("first", "second"))
+    batch.release()
+    batch.release()
+    assert calls == [("release_many", ("first", "second"))]
+
+
 def test_collect_units_filters_by_stage_and_tunes_eager_shapes() -> None:
     record: list[tuple] = []
     weights, state, tower = torch.nn.Module(), torch.nn.Module(), torch.nn.Module()
