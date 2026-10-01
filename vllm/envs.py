@@ -1772,7 +1772,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DFLASH_COMPACT_ROPE": lambda: bool(
         int(os.getenv("VLLM_DFLASH_COMPACT_ROPE", "0"))
     ),
-    # Partition DFlash auxiliary FC output rows and gather complete activations.
+    # Partition DFlash auxiliary FC output rows and gather complete activations,
+    # padding widths that do not divide by TP. Divisible widths always shard.
     "VLLM_DFLASH_SHARD_AUX_PROJECTION": lambda: bool(
         int(os.getenv("VLLM_DFLASH_SHARD_AUX_PROJECTION", "0"))
     ),
