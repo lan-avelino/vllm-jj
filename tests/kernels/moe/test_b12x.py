@@ -549,8 +549,10 @@ def test_deepseek_v4_flashinfer_cutlass_falls_through_to_w4a8(
     assert experts_cls is FlashInferExperts
 
 
+@pytest.mark.parametrize("online", [False, True])
 def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     monkeypatch: pytest.MonkeyPatch,
+    online: bool,
 ) -> None:
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
         compressed_tensors_moe_w4a4_mxfp4 as ct_mxfp4,
@@ -582,13 +584,19 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     monkeypatch.setattr(ct_mxfp4, "make_mxfp4_moe_kernel", lambda **_: kernel)
     layer = torch.nn.Module()
     layer._expert_routing_tables = lambda: ()
-    method.create_weights(
-        layer,
-        num_experts=2,
-        hidden_size=64,
-        intermediate_size_per_partition=32,
-        params_dtype=torch.bfloat16,
-    )
+    monkeypatch.setenv("VLLM_B12X_MOE_FP4_CSF", "1" if online else "0")
+    with torch.device("cuda"):
+        method.create_weights(
+            layer,
+            num_experts=2,
+            hidden_size=64,
+            intermediate_size_per_partition=32,
+            params_dtype=torch.bfloat16,
+        )
+    assert layer.w13_weight_packed.device.type == "cuda"
+    assert layer.w2_weight_packed.device.type == "cuda"
+    assert layer.w13_weight_scale.device.type == ("cpu" if online else "cuda")
+    assert layer.w2_weight_scale.device.type == ("cpu" if online else "cuda")
     w13_packed_data = layer.w13_weight_packed.data
     w2_packed_data = layer.w2_weight_packed.data
 

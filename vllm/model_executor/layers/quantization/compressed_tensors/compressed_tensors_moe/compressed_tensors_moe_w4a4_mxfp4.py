@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -80,6 +81,13 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     ):
         layer.num_experts = num_experts
         layer.params_dtype = params_dtype
+        # Online compression stages scales on CPU until each layer is prepared,
+        # so native and compressed copies of every layer need not coexist in VRAM.
+        scale_device = (
+            "cpu"
+            if envs.VLLM_B12X_MOE_FP4_CSF and self.mxfp4_backend in B12X_BACKENDS
+            else None
+        )
 
         w13_weight = torch.nn.Parameter(
             torch.empty(
@@ -115,6 +123,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // self.group_size,
                 dtype=torch.uint8,
+                device=scale_device,
             ),
             requires_grad=False,
         )
@@ -131,6 +140,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 # 2 fp4 items are packed in the input dimension
                 intermediate_size_per_partition // self.group_size,
                 dtype=torch.uint8,
+                device=scale_device,
             ),
             requires_grad=False,
         )
