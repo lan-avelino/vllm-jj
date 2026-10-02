@@ -1065,6 +1065,81 @@ def test_b12x_source_release_preserves_prepared_storage_owner() -> None:
     )
 
 
+def test_online_csf_scratch_has_model_scoped_lifetime():
+    from vllm.model_executor.layers.quantization.utils import (
+        b12x_scale_compression as csf,
+    )
+
+    w1 = torch.empty((2, 128, 128), dtype=torch.uint8)
+    w2 = torch.empty((2, 256, 32), dtype=torch.uint8)
+    parallel = FusedMoEParallelConfig.make_no_parallel()
+    first_config, second_config = VllmConfig(), VllmConfig()
+    with set_current_vllm_config(first_config):
+        first = csf.get_scale_scratch(w1, w2, 16, parallel)
+        assert csf.get_scale_scratch(w1, w2, 16, parallel) is first
+    with set_current_vllm_config(second_config):
+        other = csf.get_scale_scratch(w1, w2, 16, parallel)
+        assert other.buffers[0].data_ptr() != first.buffers[0].data_ptr()
+    references = [weakref.ref(t) for t in first.buffers]
+    del first
+    gc.collect()
+    assert all(ref() is None for ref in references)
+
+
+def test_online_csf_scratch_rejects_concurrent_microbatches():
+    from vllm.model_executor.layers.quantization.utils import (
+        b12x_scale_compression as csf,
+    )
+
+    config = VllmConfig()
+    config.parallel_config.enable_dbo = True
+    w = torch.empty((2, 128, 128), dtype=torch.uint8)
+    with (
+        set_current_vllm_config(config),
+        pytest.raises(NotImplementedError, match="ubatching"),
+    ):
+        csf.get_scale_scratch(w, w, 16, FusedMoEParallelConfig.make_no_parallel())
+
+
+@pytest.mark.skipif(not _has_b12x_moe(), reason="requires b12x MoE on SM120")
+@pytest.mark.parametrize(
+    "weight_dtype,activation_dtype", [("nvfp4", "nvfp4"), ("mxfp4", "mxfp8")]
+)
+def test_online_csf_releases_original_scale_tensors(
+    monkeypatch, weight_dtype, activation_dtype
+):
+    monkeypatch.setenv("VLLM_B12X_MOE_FP4_CSF", "1")
+    with set_current_vllm_config(VllmConfig()):
+        case = _make_b12x_moe_case(weight_dtype, activation_dtype)
+        scales = [
+            weakref.ref(case.quant_config.w1_scale),
+            weakref.ref(case.quant_config.w2_scale),
+        ]
+        config = make_dummy_moe_config(
+            num_experts=4, hidden_dim=512, intermediate_size=128
+        )
+        experts = B12xExperts(config, case.quant_config)
+        layer = SimpleNamespace(
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            w13_weight=case.w1,
+            w2_weight=case.w2,
+            w13_weight_scale=case.quant_config.w1_scale,
+            w2_weight_scale=case.quant_config.w2_scale,
+            w13_weight_scale_2=case.quant_config.g1_alphas,
+            w2_weight_scale_2=case.quant_config.g2_alphas,
+            b12x_preparation_suppressed=True,
+        )
+        if weight_dtype == "nvfp4":
+            layer.w13_input_scale = 1.0 / case.quant_config.a1_gscale
+            layer.w2_input_scale = 1.0 / case.quant_config.a2_gscale
+        experts.process_weights_after_loading(layer)
+        gc.collect()
+        assert all(reference() is None for reference in scales)
+        assert layer.w13_weight_scale.numel() == layer.w2_weight_scale.numel() == 0
+        assert experts._prepared_experts.plan.scale_compression == "csf"
+
+
 def test_b12x_moe_rejects_router_weight_on_input_for_w4a8() -> None:
     experts = B12xExperts(
         make_dummy_moe_config(hidden_dim=256, intermediate_size=64),

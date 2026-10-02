@@ -1,0 +1,11 @@
+{
+  "schema": "local-inference-release-change/v1",
+  "id": "vllm-online-fp4-csf",
+  "category": "feature",
+  "summary": "Load native FP4 expert weights with optional lossless CSF scales",
+  "models": ["Kimi-K3", "DeepSeek-V4.1-Flash", "GLM-5.3-Flash", "Qwen3.8-Flash-Next"],
+  "compatibility": "VLLM_B12X_MOE_FP4_CSF defaults to 0. Enabling it requires the paired B12X online scale preparation API and serialized TP execution.",
+  "details": ["CPU scale staging bounds GPU preparation to one layer; source scale parameters are released after compression."],
+  "pull_requests": [],
+  "requires": ["b12x-online-csf-scale-preparation"]
+}

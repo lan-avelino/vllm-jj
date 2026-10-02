@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -577,6 +578,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         weight_dtype = torch.uint8
         scale_dtype = torch.uint8
         mxfp4_block = 32
+        scale_device = (
+            "cpu"
+            if envs.VLLM_B12X_MOE_FP4_CSF
+            and self.mxfp4_backend
+            in (
+                Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
+                Mxfp4MoeBackend.B12X_MXFP4_BF16,
+            )
+            else None
+        )
 
         layer.params_dtype = params_dtype
         layer.num_experts = num_experts
@@ -607,6 +618,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     hidden_size // mxfp4_block,
                 ),
                 dtype=scale_dtype,
+                device=scale_device,
             ),
             requires_grad=False,
         )
@@ -637,6 +649,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     intermediate_size_per_partition // mxfp4_block,
                 ),
                 dtype=scale_dtype,
+                device=scale_device,
             ),
             requires_grad=False,
         )

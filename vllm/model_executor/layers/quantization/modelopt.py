@@ -877,6 +877,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.quant_config = self.quant_config
         weight_dtype = torch.uint8
         weight_scale_dtype = torch.float8_e4m3fn
+        scale_device = (
+            "cpu"
+            if envs.VLLM_B12X_MOE_FP4_CSF and self.nvfp4_backend == NvFp4MoeBackend.B12X
+            else None
+        )
         weight_loader = extra_weight_attrs.get("weight_loader")
         global_num_experts = extra_weight_attrs.get("global_num_experts")
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
@@ -917,6 +922,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // self.quant_config.group_size,
                 dtype=weight_scale_dtype,
+                device=scale_device,
             ),
             input_dim=1,
             output_dim=2,
@@ -931,6 +937,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 # 2 fp4 items are packed in the input dimension
                 intermediate_size_per_partition // self.quant_config.group_size,
                 dtype=weight_scale_dtype,
+                device=scale_device,
             ),
             input_dim=1,
             output_dim=2,
