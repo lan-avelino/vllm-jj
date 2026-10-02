@@ -1,0 +1,18 @@
+ARG OVERLAY=ghcr.io/lan-avelino/vllm-jj-overlay:jj-cand6
+ARG BASE=ghcr.io/local-inference-lab/vllm:karmic-kraken-beta-20261002-7b398c9e420c91eb@sha256:2230db60afb4fd06dc2ef2b7f7f27dc7f78d7a50be70a08461b4df9fa5e90732
+FROM ${OVERLAY} AS overlay-src
+FROM ${BASE}
+ARG SITE=/opt/venv/lib/python3.12/site-packages
+# Refuse to overlay a base whose files differ from the ones this overlay was cut
+# from (vLLM 93dabce32f; hashes match the release's runtime-files manifest).
+RUN cd ${SITE} && printf '%s  %s\n' \
+      81f987ff50353ed64076cb462036758765f6c007c3849c773b1b181f58c21414 vllm/v1/core/sched/scheduler.py \
+      9807a36c740b874d012a8091890711599e1a4f5907ef9380ffc03adeb000f8fa vllm/v1/worker/gpu/structured_outputs.py \
+    | sha256sum -c - && test ! -e vllm/v1/worker/gpu/structured_outputs_warmup.py
+COPY --from=overlay-src /overlay/ ${SITE}/
+RUN /opt/venv/bin/python -m compileall -q ${SITE}/vllm/v1/core/sched ${SITE}/vllm/v1/worker/gpu > /dev/null && echo "overlay syntax ok"
+LABEL org.opencontainers.image.title="vllm-jj-cand6" \
+      org.opencontainers.image.description="Karmic Kraken beta 20261002 + Azeus liveness guard + grammar-bitmask JIT prewarm" \
+      org.opencontainers.image.source="https://github.com/lan-avelino/vllm-jj" \
+      org.opencontainers.image.base.name="ghcr.io/local-inference-lab/vllm:karmic-kraken-beta-20261002-7b398c9e420c91eb" \
+      org.opencontainers.image.base.digest="sha256:2230db60afb4fd06dc2ef2b7f7f27dc7f78d7a50be70a08461b4df9fa5e90732"
