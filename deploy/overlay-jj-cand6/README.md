@@ -46,6 +46,19 @@ blobs) and fails the build if `BASE` points at anything else.
 
 ## Build
 
+CI publishes the overlay image (amd64) on every push touching this directory
+(`.github/workflows/jj-overlay-image.yml`), as
+`ghcr.io/lan-avelino/vllm-jj-overlay:jj-cand6` and `:jj-cand6-<commit sha>`.
+Assemble the full image on the GPU host:
+
+```bash
+docker build -f Dockerfile.apply \
+  --build-arg OVERLAY=ghcr.io/lan-avelino/vllm-jj-overlay:jj-cand6-<sha> \
+  -t lan-avelino/vllm-jj:jj-cand6 .
+```
+
+Or build both locally:
+
 ```bash
 # on an amd64 host; build.sh refuses arm64 (cand5 lesson: arm64-only manifest)
 ./build.sh
