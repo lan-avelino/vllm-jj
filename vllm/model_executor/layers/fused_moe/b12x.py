@@ -3,6 +3,7 @@
 """b12x modular tensor-parallel fused MoE backend."""
 
 import functools
+import time
 import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -435,6 +436,26 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             "w4a8_nvfp4": fused_moe.ActivationMode.A8,
             "nvfp4": fused_moe.ActivationMode.A4,
         }[quant_mode]
+        import vllm.envs as envs
+
+        compress = envs.VLLM_B12X_MOE_FP4_CSF and self._source_format in (
+            "fp4_e8m0_k32",
+            "modelopt_nvfp4",
+        )
+        scale_scratch = None
+        if compress:
+            from vllm.model_executor.layers.quantization.utils import (
+                b12x_scale_compression,
+            )
+
+            self._scale_scratch_owner = b12x_scale_compression.get_scale_scratch(
+                w1,
+                w2,
+                16 if self._source_format == "modelopt_nvfp4" else 32,
+                self.moe_config.moe_parallel_config,
+            )
+            scale_scratch = self._scale_scratch_owner.buffers
+        started = time.perf_counter()
         weight_plan = fused_moe.plan_weights(
             source=fused_moe.PackedSource(
                 format=fused_moe.PackedSourceFormat(self._source_format),
@@ -453,9 +474,15 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                 hidden_size=hidden_size,
                 intermediate_size=intermediate_size,
             ),
+            constraints=(
+                fused_moe.WeightPlanConstraints(scale_compression="csf")
+                if compress
+                else None
+            ),
         )
-        return fused_moe.prepare_weights(
+        prepared = fused_moe.prepare_weights(
             plan=weight_plan,
+            **({"scale_scratch": scale_scratch} if compress else {}),
             weights=fused_moe.PackedWeights(
                 w13=w1,
                 w2=w2,
@@ -470,6 +497,17 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                 immutable_input_scales=True,
             ),
         )
+        if compress:
+            torch.accelerator.synchronize(w1.device)
+            logger.info(
+                "Online CSF prepared %s experts E=%d H=%d N=%d in %.3f s",
+                self._source_format,
+                num_experts,
+                hidden_size,
+                intermediate_size,
+                time.perf_counter() - started,
+            )
+        return prepared
 
     def _refresh_quant_config(self, layer: torch.nn.Module) -> None:
         if self._source_format in ("iq2_xs", "iq2_xxs", "q8_0"):
