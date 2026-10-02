@@ -82,4 +82,4 @@ jobs:
           IMAGE: ghcr.io/lan-avelino/vllm-jj-overlay:jj-${{ steps.cand.outputs.name }}-${{ github.sha }}
         run: |
           docker buildx imagetools inspect "$IMAGE"
-          docker buildx imagetools inspect "$IMAGE" --format '{{json .Image}}' | grep -q '"architecture":"amd64"'
+          docker buildx imagetools inspect "$IMAGE" --format '{{json .Image}}' | grep -Eq '"architecture": *"amd64"'
