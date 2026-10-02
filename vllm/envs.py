@@ -180,6 +180,7 @@ if TYPE_CHECKING:
     VLLM_SCHEDULER_UNCAP_PREFILL_ONLY_STEPS: bool = False
     VLLM_CHECKPOINT_RESTORE_MAX_WAIT_S: float = 60.0
     VLLM_MLA_DISABLE: bool = False
+    VLLM_K3_DENSE_MLA_PARTIAL_DTYPE: Literal["bf16", "fp32"] = "bf16"
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: str | None = None
@@ -204,6 +205,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
     VLLM_B12X_BF16_GEMV: bool = False
+    VLLM_B12X_MOE_FP4_CSF: bool = False
     VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE: Literal["0", "1", "all", "w13", "w2"] = "0"
     VLLM_DEFAULT_MOE_BACKEND: str = "auto"
     VLLM_B12X_DENSE_ACTIVATION_MODE: Literal["auto", "a16", "quantized"] = "auto"
@@ -1556,6 +1558,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE": lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+    # Keep dense MLA split partials in FP32 until the merge when requested.
+    "VLLM_K3_DENSE_MLA_PARTIAL_DTYPE": env_with_choices(
+        "VLLM_K3_DENSE_MLA_PARTIAL_DTYPE", "bf16", ["bf16", "fp32"]
+    ),
     # If set, vLLM will pick up the provided Flash Attention MLA
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
@@ -1776,7 +1782,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DFLASH_COMPACT_ROPE": lambda: bool(
         int(os.getenv("VLLM_DFLASH_COMPACT_ROPE", "0"))
     ),
-    # Partition DFlash auxiliary FC output rows and gather complete activations.
+    # Partition DFlash auxiliary FC output rows and gather complete activations,
+    # padding widths that do not divide by TP. Divisible widths always shard.
     "VLLM_DFLASH_SHARD_AUX_PROJECTION": lambda: bool(
         int(os.getenv("VLLM_DFLASH_SHARD_AUX_PROJECTION", "0"))
     ),
@@ -1810,6 +1817,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Opt-in: under --linear-backend b12x, serve decode-sized (<= 8 row) BF16
     # linears through b12x gemm.bf16_gemv plans autotuned against cuBLAS.
     "VLLM_B12X_BF16_GEMV": lambda: os.getenv("VLLM_B12X_BF16_GEMV", "0") == "1",
+    # Compress native expert block scales losslessly during weight preparation.
+    "VLLM_B12X_MOE_FP4_CSF": lambda: bool(int(os.getenv("VLLM_B12X_MOE_FP4_CSF", "0"))),
     # Select layer-wide activation scales for b12x NVFP4 MoE projections.
     "VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE": env_with_choices(
         "VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE",
