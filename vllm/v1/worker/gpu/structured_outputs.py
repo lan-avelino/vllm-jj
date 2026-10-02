@@ -77,7 +77,7 @@ class StructuredOutputsWorker:
         # warmup, and this deployment runs it in `error` mode, where a compile
         # during inference raises and kills the engine). Rationale and variant
         # matrix: vllm/v1/worker/gpu/structured_outputs_warmup.py and
-        # deploy/overlay-jj-cand5/WARMUP-MATRIX.md.
+        # deploy/overlay-jj-cand5/WARMUP-MATRIX.md on branch deploy/jj-cand5.
         try:
             from vllm.v1.worker.gpu.structured_outputs_warmup import (
                 warmup_grammar_bitmask,

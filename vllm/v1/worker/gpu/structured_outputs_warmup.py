@@ -21,7 +21,7 @@ This module compiles the whole specialization matrix when the V2 model runner
 builds its ``StructuredOutputsWorker`` in ``load_model()``, which happens before
 ``compile_or_warm_up_model()`` calls ``activate_jit_monitor()``. The derivation
 and the observed compile keys are documented in
-``deploy/overlay-jj-cand5/WARMUP-MATRIX.md``:
+``deploy/overlay-jj-cand5/WARMUP-MATRIX.md`` on branch ``deploy/jj-cand5``:
 
 * ``MASK_STRIDE`` and ``BLOCK_SIZE`` are constexprs (``worker.mask_stride`` and
   ``GRAMMAR_BITMASK_BLOCK_SIZE``);

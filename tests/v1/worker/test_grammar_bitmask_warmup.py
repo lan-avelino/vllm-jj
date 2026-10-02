@@ -7,7 +7,7 @@ the worker package loads ``@triton.jit`` modules, so an active driver is
 required; the module skips on CPU-only hosts (measured: 7 passed with a driver,
 `TypeError: 'NoneType' object is not callable` from the Triton stub without
 one). The variant matrix is documented in
-``deploy/overlay-jj-cand5/WARMUP-MATRIX.md``.
+``deploy/overlay-jj-cand5/WARMUP-MATRIX.md`` on branch ``deploy/jj-cand5``.
 """
 
 from types import SimpleNamespace
