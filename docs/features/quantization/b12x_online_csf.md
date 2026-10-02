@@ -35,6 +35,13 @@ Dense layers retain their existing quantization. Expert activation precision
 also retains its native selection: MXFP8 for DS4.1 and BF16 for Kimi; the
 compression flag does not force BF16 activations.
 
+Each TP worker compresses its local shard independently. The encoder groups
+short rows and builds NVFP4 exception indices on the GPU; it needs no extra
+thread or stream setting. For Kimi, use `--quantization mxfp4`: the model
+configuration normalizes its native compressed-tensors metadata to this
+handler. An explicit `--quantization compressed-tensors` conflicts with that
+normalization.
+
 The implementation requires TP with PP1/DP1, no expert parallelism, and no
 microbatch overlap. Separate model configurations own separate buffers.
 Loading a model does not retain another model's scratch. MXFP4 supports the
@@ -46,3 +53,6 @@ For measurements and qualification scope, see the B12X
 report. Usable concurrency also depends on KV and recurrent-state capacity;
 a checkpoint fitting in VRAM does not by itself qualify every batch size or
 context length.
+
+Kimi/GLM startup and encoder measurements are recorded in
+[the preparation performance report](https://github.com/local-inference-lab/b12x/blob/feat/csf-online-scales/validation/csf/online-preparation-performance.md).
