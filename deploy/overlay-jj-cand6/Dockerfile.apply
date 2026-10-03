@@ -8,11 +8,13 @@ ARG SITE=/opt/venv/lib/python3.12/site-packages
 RUN cd ${SITE} && printf '%s  %s\n' \
       81f987ff50353ed64076cb462036758765f6c007c3849c773b1b181f58c21414 vllm/v1/core/sched/scheduler.py \
       9807a36c740b874d012a8091890711599e1a4f5907ef9380ffc03adeb000f8fa vllm/v1/worker/gpu/structured_outputs.py \
+      ccaaae9863bc004540510495251eb3e4ef0bb9aad6e021f620f504309d6ab4a6 vllm/envs.py \
+      a6041ddf35d7aebb8452697ed16274451af533042acfc46760860725d153f5cb vllm/v1/structured_output/backend_xgrammar.py \
     | sha256sum -c - && test ! -e vllm/v1/worker/gpu/structured_outputs_warmup.py
 COPY --from=overlay-src /overlay/ ${SITE}/
-RUN /opt/venv/bin/python -m compileall -q ${SITE}/vllm/v1/core/sched ${SITE}/vllm/v1/worker/gpu > /dev/null && echo "overlay syntax ok"
+RUN /opt/venv/bin/python -m compileall -q ${SITE}/vllm/envs.py ${SITE}/vllm/v1/core/sched ${SITE}/vllm/v1/worker/gpu ${SITE}/vllm/v1/structured_output > /dev/null && echo "overlay syntax ok"
 LABEL org.opencontainers.image.title="vllm-jj-cand6" \
-      org.opencontainers.image.description="Karmic Kraken beta 20261002 + Azeus liveness guard + grammar-bitmask JIT prewarm" \
+      org.opencontainers.image.description="Karmic Kraken beta 20261002 + Azeus liveness guard + grammar-bitmask JIT prewarm + json_schema whitespace cap" \
       org.opencontainers.image.source="https://github.com/lan-avelino/vllm-jj" \
       org.opencontainers.image.base.name="ghcr.io/local-inference-lab/vllm:karmic-kraken-beta-20261002-7b398c9e420c91eb" \
       org.opencontainers.image.base.digest="sha256:2230db60afb4fd06dc2ef2b7f7f27dc7f78d7a50be70a08461b4df9fa5e90732"
