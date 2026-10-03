@@ -1,0 +1,13 @@
+diff --git a/src/syscall/seccomp.c b/src/syscall/seccomp.c
+index 760f634..4e819d4 100644
+--- a/src/syscall/seccomp.c
++++ b/src/syscall/seccomp.c
+@@ -341,8 +341,6 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
+ 
+ /* List of sysnums handled by PRoot.  */
+ static FilteredSysnum proot_sysnums[] = {
+-    { PR_accept, FILTER_SYSEXIT },
+-    { PR_accept4, FILTER_SYSEXIT },
+     { PR_access, 0 },
+     { PR_acct, 0 },
+     { PR_bind, 0 },
