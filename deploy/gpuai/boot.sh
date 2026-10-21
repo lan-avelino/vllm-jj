@@ -3,12 +3,14 @@
 #
 # The instance runs the Karmic Kraken base image (pinned digest) as its container. On every
 # start this script applies the cand6 overlay, fetches the model (skipped once complete) and
-# serves on $PORT under a restart loop. GPU.ai's app URL fronts $PORT with basic auth, which
-# occupies the Authorization header, so vLLM runs without --api-key.
+# serves on $HOST:$PORT under a restart loop. GPU.ai's app URL fronts $PORT with basic auth,
+# which occupies the Authorization header, so vLLM runs without --api-key and binds to
+# loopback unless HOST says otherwise.
 set -euo pipefail
 
 BOOT_BASE=${BOOT_BASE:?raw URL of deploy/gpuai at a pinned commit}
 DATA=${DATA:-/workspace}
+HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-8000}
 SITE=/opt/venv/lib/python3.12/site-packages
 MODEL_REPO=deepseek-ai/DeepSeek-V4.1-Flash-1017
@@ -68,13 +70,13 @@ set -a
 . "$DATA/boot/serve.env"
 set +a
 export HOME=/root DO_NOT_TRACK=1 VLLM_HTTP_TIMEOUT_KEEP_ALIVE=150 VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1
-mapfile -t ARGV < <(python3 - "$DATA/boot/serve.argv.json" "$PORT" <<'PY'
+mapfile -t ARGV < <(python3 - "$DATA/boot/serve.argv.json" "$HOST" "$PORT" <<'PY'
 import json, sys
-argv, port = json.load(open(sys.argv[1])), sys.argv[2]
+argv, host, port = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
 out, i = [], 0
 while i < len(argv):
     if argv[i] in ("--host", "--port"):
-        out += [argv[i], "0.0.0.0" if argv[i] == "--host" else port]
+        out += [argv[i], host if argv[i] == "--host" else port]
         i += 2
     else:
         out.append(argv[i])
@@ -94,7 +96,7 @@ for d, _, files in os.walk(sys.argv[1]):
         fd = os.open(os.path.join(d, f), os.O_RDONLY)
         os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
         os.close(fd)' "$MODEL_DIR"
-  log "starting vLLM on :$PORT"
+  log "starting vLLM on $HOST:$PORT"
   set +e
   "${ARGV[@]}" >> "$DATA/logs/vllm.log" 2>&1
   rc=$?

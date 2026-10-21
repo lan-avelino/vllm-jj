@@ -21,7 +21,9 @@ the gpuhub deployment.
 
 The app URL (`https://<id>.apps.gpu.ai`) is behind GPU.ai's per-instance basic auth, which
 uses the `Authorization` header that vLLM's `--api-key` also needs, so vLLM runs without an
-API key and the basic-auth login is the access control.
+API key and the basic-auth login is the access control. vLLM binds to `127.0.0.1` so only the
+in-container tunnel client can reach it; set `HOST` in the launch env only if GPU.ai's port
+exposure cannot reach loopback.
 
 ## Launch
 
