@@ -1,0 +1,11 @@
+vllm/v1/core/sched/scheduler.py
+vllm/v1/worker/gpu/structured_outputs.py
+vllm/v1/worker/gpu/structured_outputs_warmup.py
+vllm/envs.py
+vllm/v1/structured_output/backend_xgrammar.py
+vllm/config/engram.py
+vllm/models/deepseek_v41/common/engram.py
+vllm/models/deepseek_v41/nvidia/engram.py
+vllm/models/deepseek_v41/quant_config.py
+vllm/models/deepseek_v4_1/common/engram.py
+vllm/models/deepseek_v4_1/quant_config.py
