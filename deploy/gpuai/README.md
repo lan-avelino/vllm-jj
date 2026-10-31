@@ -8,9 +8,11 @@ On every container start `boot.sh`:
 
 1. fetches its sibling files from `$BOOT_BASE` (this directory at a pinned commit) and
    checks each against the sha256 recorded in `boot.sh`;
-2. verifies the four KK base files against the hashes in `../overlay-jj-cand6/Dockerfile.apply`,
-   then applies the cand6 overlay layer (`vllm-jj-overlay` blob pinned by digest);
-3. downloads `deepseek-ai/DeepSeek-V4.1-Flash-1017` at a pinned revision with
+2. verifies the ten KK base files against the hashes in `../overlay-jj-cand7/Dockerfile.apply`,
+   then applies the cand7 overlay layer (`vllm-jj-overlay` blob pinned by digest). The check
+   runs against the stock image, so start cand7 on a fresh instance, not one that already
+   applied cand6;
+3. downloads `nvidia/DeepSeek-V4.1-Flash-1017-NVFP4` at a pinned revision with
    `fetch_model.py` (resumable, sha256-verified; a no-op once complete);
 4. serves on `$PORT` (default 8000) with the same env and argv as the gpuhub hosts, under a
    restart loop. Logs are in `$DATA/logs` (`boot.log`, `model.log`, `vllm.log`).
@@ -45,4 +47,4 @@ curl -sS https://api.gpu.ai/v1/instances -H "Authorization: Bearer $GPUAI_API_KE
 EOF
 ```
 
-`disk_gb` matters: the default 100 GB evicts the pod once the 510 GB model download passes it.
+`disk_gb` matters: the default 100 GB evicts the pod once the 429 GB model download passes it.
