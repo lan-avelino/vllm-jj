@@ -41,6 +41,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.engram import get_engram_embed_quant
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -181,6 +182,7 @@ class EngramLayout:
         self.head_dim: int = config.engram_head_dim
         self.compressed_vocab_size: int = config.engram_compressed_vocab_size
         self.pad_token_id: int = config.engram_pad_token_id
+        self.embed_quant: str = get_engram_embed_quant(config)
         assert len(self.layer_ids) == len(self.num_embeddings)
 
         primes = []
@@ -564,9 +566,13 @@ def _engram_head_shard_weight_loader(
     param: torch.nn.Parameter, loaded_weight: torch.Tensor
 ) -> None:
     """Load this rank's complete head buckets. ue8m0 scales arrive as
-    float8_e8m0fnu; keep the raw bytes (the param stores uint8)."""
+    float8_e8m0fnu and packed MXFP4 rows may arrive as int8; keep the raw
+    bytes (the param stores uint8)."""
     part_rows = param.shape[0]
-    if loaded_weight.dtype == torch.float8_e8m0fnu:
+    if param.dtype == torch.uint8 and loaded_weight.dtype in (
+        torch.float8_e8m0fnu,
+        torch.int8,
+    ):
         loaded_weight = loaded_weight.view(torch.uint8)
     shard = loaded_weight.narrow(0, param.engram_vocab_start, part_rows)
     assert shard.shape == param.shape, (
@@ -602,8 +608,9 @@ def _engram_lookup_kernel(
     QUANT_BLOCK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     GRID,
+    PACKED_FP4: tl.constexpr = False,
 ):
-    """Gather fp8 rows, apply their ue8m0 block scales, write bf16.
+    """Gather fp8 or packed E2M1 rows, apply their ue8m0 block scales, write bf16.
 
     Only this rank's heads are read; padded heads write zeros for all-gather.
     `weight`/`scales` may address pinned host memory through UVA.
@@ -623,11 +630,26 @@ def _engram_lookup_kernel(
         owned = valid & (head < TOTAL_HEADS)
         owned &= (index >= vocab_start) & (index < vocab_end)
         local = tl.where(owned, index - vocab_start, 0)
-        values = tl.load(
-            weight + local[:, None] * DIM + cols[None, :],
-            mask=owned[:, None],
-            other=0.0,
-        )
+        if PACKED_FP4:
+            # Even column in the low nibble. E2M1 magnitude with e = bits 2:1,
+            # m = bit 0: m * 0.5 if e == 0, else (2 + m) * 2**(e - 2).
+            byte = tl.load(
+                weight + local[:, None] * (DIM // 2) + (cols // 2)[None, :],
+                mask=owned[:, None],
+                other=0,
+            ).to(tl.int32)
+            nib = tl.where(cols[None, :] % 2 == 0, byte & 0xF, (byte >> 4) & 0xF)
+            e = (nib & 0x7) >> 1
+            m = (nib & 0x1).to(tl.float32)
+            pow2 = ((e - 2 + 127) << 23).to(tl.float32, bitcast=True)
+            mag = tl.where(e == 0, m * 0.5, (2.0 + m) * pow2)
+            values = tl.where((nib & 0x8) != 0, -mag, mag)
+        else:
+            values = tl.load(
+                weight + local[:, None] * DIM + cols[None, :],
+                mask=owned[:, None],
+                other=0.0,
+            )
         scale = tl.load(
             scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
             mask=owned[:, None],
@@ -643,9 +665,12 @@ def _engram_lookup_kernel(
 
 
 class ParallelEngramEmbedding(nn.Module):
-    """TP-sharded hash heads with FP8 rows and per-block E8M0 scales."""
+    """TP-sharded hash heads with FP8 or packed MXFP4 rows and per-block E8M0
+    scales. MXFP4 rows are E2M1 values, two per byte (even column in the low
+    nibble), stored as uint8 since torch has no 4-bit dtype."""
 
     _weight_loader = staticmethod(_engram_head_shard_weight_loader)
+    packed_fp4: bool = False
 
     def __init__(
         self,
@@ -653,10 +678,14 @@ class ParallelEngramEmbedding(nn.Module):
         dim: int,
         head_sizes: tuple[int, ...],
         block_size: int = 32,
+        packed_fp4: bool = False,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
         assert sum(head_sizes) <= num_embeddings
+        assert not packed_fp4 or dim % 2 == 0
+        self.packed_fp4 = packed_fp4
+        self.row_bytes = dim // 2 if packed_fp4 else dim
         self.num_embeddings = num_embeddings
         self.dim = dim
         self.block_size = block_size
@@ -693,8 +722,9 @@ class ParallelEngramEmbedding(nn.Module):
         return self.tp_size, get_tensor_model_parallel_rank()
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        weight_dtype = torch.uint8 if self.packed_fp4 else torch.float8_e4m3fn
         return (
-            torch.empty(self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn),
+            torch.empty(self.part_num_embeddings, self.row_bytes, dtype=weight_dtype),
             torch.empty(
                 self.part_num_embeddings, self.dim // self.block_size, dtype=torch.uint8
             ),
@@ -735,6 +765,7 @@ class ParallelEngramEmbedding(nn.Module):
             QUANT_BLOCK=self.block_size,
             BLOCK_R=16,
             GRID=grid,
+            PACKED_FP4=self.packed_fp4,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
@@ -950,6 +981,7 @@ class Engram(nn.Module):
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
+            packed_fp4=getattr(layout, "embed_quant", "fp8") == "mxfp4",
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:

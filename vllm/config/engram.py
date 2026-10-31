@@ -44,12 +44,56 @@ def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
 _RAM_RESERVE_GIB = 4
 _RAM_RESERVE_BYTES = _RAM_RESERVE_GIB << 30
 
+ENGRAM_EMBED_QUANTS = ("fp8", "mxfp4")
 
-def _ram_table_nbytes(hf_config, tp_size: int = 1) -> int:
-    """Full-model packed E4M3/E8M0 storage, including ceil-row TP padding."""
-    # Native V4.1 rows contain 256 E4M3 bytes and eight E8M0 scale bytes.
+
+def get_engram_embed_quant(hf_config) -> str:
+    """Return the Engram table format a checkpoint declares; absent means FP8.
+
+    MXFP4 tables are E2M1 values, two per byte (even column in the low nibble),
+    with UE8M0 scales per 32 columns.
+
+    Raises:
+        ValueError: If the format is unknown or its block layout is not the
+            one the lookup kernels decode.
+    """
+    quant_config = getattr(hf_config, "quantization_config", None) or {}
+    embed_quant = quant_config.get("engram_embed_quant", "fp8")
+    if embed_quant not in ENGRAM_EMBED_QUANTS:
+        raise ValueError(
+            f"Unsupported engram_embed_quant {embed_quant!r}; "
+            f"expected one of {ENGRAM_EMBED_QUANTS}"
+        )
+    if embed_quant == "mxfp4":
+        block_size = quant_config.get("engram_embed_block_size", 32)
+        scale_dtype = quant_config.get("engram_embed_scale_dtype", "ue8m0")
+        if (block_size, scale_dtype) != (32, "ue8m0"):
+            raise ValueError(
+                "MXFP4 Engram tables require engram_embed_block_size=32 and "
+                f"engram_embed_scale_dtype='ue8m0'; got {block_size!r} and "
+                f"{scale_dtype!r}"
+            )
+        layers = quant_config.get("engram_embed_layers")
+        layer_ids = getattr(hf_config, "engram_layer_ids", None)
+        if (
+            layers is not None
+            and layer_ids is not None
+            and sorted(layers) != sorted(layer_ids)
+        ):
+            raise ValueError(
+                "Engram tables must share one format; engram_embed_layers "
+                f"{list(layers)} differs from engram_layer_ids {list(layer_ids)}"
+            )
+    return embed_quant
+
+
+def _ram_table_nbytes(hf_config, tp_size: int = 1, packed_fp4: bool = False) -> int:
+    """Full-model packed table storage, including ceil-row TP padding."""
+    # Native V4.1 rows hold 256 E4M3 bytes (128 packed E2M1 bytes for MXFP4)
+    # and eight E8M0 scale bytes.
+    row_nbytes = (128 if packed_fp4 else 256) + 8
     return sum(
-        ((rows + tp_size - 1) // tp_size) * tp_size * (256 + 8)
+        ((rows + tp_size - 1) // tp_size) * tp_size * row_nbytes
         for rows in hf_config.engram_num_embeddings
     )
 
@@ -118,23 +162,36 @@ class EngramConfig:
 
         if self.table_memory != "disk" and self.disk_resident_scales:
             raise ValueError("disk Engram controls require table_memory='disk'")
+        packed_fp4 = (
+            get_engram_embed_quant(getattr(model_config, "hf_config", None)) == "mxfp4"
+        )
+        if packed_fp4 and self.table_memory == "disk":
+            raise ValueError(
+                "table_memory='disk' reads FP8 rows and does not support MXFP4 "
+                "Engram tables; use 'ram' or 'device'."
+            )
         if self.table_memory == "ram":
-            self._verify_ram_budget(model_config.hf_text_config, tp_size)
+            self._verify_ram_budget(model_config.hf_text_config, tp_size, packed_fp4)
         elif self.disk_resident_scales:
             self._verify_ram_budget(
-                model_config.hf_text_config, tp_size, scales_only=True
+                model_config.hf_text_config, tp_size, packed_fp4, scales_only=True
             )
 
     def _verify_ram_budget(
-        self, hf_config, tp_size: int, *, scales_only: bool = False
+        self,
+        hf_config,
+        tp_size: int,
+        packed_fp4: bool = False,
+        *,
+        scales_only: bool = False,
     ) -> None:
         from vllm.model_executor.model_loader.weight_utils import (
             _get_available_ram_bytes,
         )
 
-        planned = _ram_table_nbytes(hf_config, tp_size)
+        planned = _ram_table_nbytes(hf_config, tp_size, packed_fp4)
         if scales_only:
-            planned = planned // 264 * 8
+            planned = planned // (136 if packed_fp4 else 264) * 8
         if self._ram_budget_checked_nbytes == planned:
             return
         reserve = _RAM_RESERVE_BYTES

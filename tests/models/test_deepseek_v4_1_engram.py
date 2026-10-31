@@ -749,6 +749,119 @@ def test_ram_engram_budget_reserves_memory_and_survives_worker_serialization(
         worker_config.verify_model_config(model_config, tp_size=8)
 
 
+def _mxfp4_model_config():
+    return SimpleNamespace(
+        architecture="DeepseekV41ForCausalLM",
+        hf_text_config=SimpleNamespace(
+            engram_layer_ids=(1, 14), engram_num_embeddings=(17, 31)
+        ),
+        hf_config=SimpleNamespace(
+            engram_layer_ids=(1, 14),
+            quantization_config={"engram_embed_quant": "mxfp4"},
+        ),
+    )
+
+
+def test_mxfp4_engram_budget_charges_packed_rows(monkeypatch):
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    # TP4 rounds the two global tables to 20 and 32 rows of 128 + 8 bytes.
+    available = (4 << 30) + (20 + 32) * 136
+    monkeypatch.setattr(weight_utils, "_get_available_ram_bytes", lambda: available)
+    EngramConfig(table_memory="ram").verify_model_config(
+        _mxfp4_model_config(), tp_size=4
+    )
+    available -= 1
+    with pytest.raises(ValueError, match="Insufficient RAM"):
+        EngramConfig(table_memory="ram").verify_model_config(
+            _mxfp4_model_config(), tp_size=4
+        )
+
+
+def test_mxfp4_engram_rejects_disk_tables(monkeypatch):
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="MXFP4"):
+        EngramConfig(table_memory="disk").verify_model_config(
+            _mxfp4_model_config(), tp_size=4
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("table_memory", ["device", "ram"])
+@pytest.mark.parametrize("tp_rank", [0, 3])
+@pytest.mark.parametrize("source_dtype", [torch.uint8, torch.int8])
+def test_mxfp4_engram_lookup_reads_packed_rows(table_memory, tp_rank, source_dtype):
+    """Packed rows load as half-width bytes and decode bit-exactly, including
+    zeros for rows another TP rank owns and for padded or dead ids."""
+    geometry = native.build_geometry(base_table_size=19, compressed_vocab_size=32)
+    caps = native.Caps(
+        device="cuda",
+        max_tokens=8,
+        max_seqs=2,
+        max_requests=2,
+        vocab_size=32,
+        layer_id=geometry.layer_ids[0],
+        tp_size=4,
+        tp_rank=tp_rank,
+    )
+    table_rows = geometry.num_embeddings[0]
+    embedding = ParallelEngramEmbedding(
+        None, caps, geometry, table_memory, packed_fp4=True
+    )
+    try:
+        assert embedding.weight.shape == (embedding.shard_rows, 128)
+        assert embedding.weight.dtype == torch.uint8
+        torch.manual_seed(0)
+        packed = torch.randint(0, 256, (table_rows, 128), dtype=torch.uint8)
+        scales = torch.randint(120, 134, (table_rows, 8), dtype=torch.uint8)
+        embedding.load_weights(
+            (
+                ("weight", packed.view(source_dtype)),
+                ("weight_scale_inv", scales.view(torch.float8_e8m0fnu)),
+            )
+        )
+        start, end = embedding.shard_start, embedding.shard_end
+        ids_cpu = torch.tensor(
+            [[start, min(end, table_rows) - 1, start - 1, end, table_rows, -1] * 4] * 4
+        )
+        out = torch.zeros(caps.max_tokens, 6144, dtype=torch.bfloat16, device="cuda")
+        embedding.lookup(ids_cpu.cuda(), out)
+
+        e2m1 = torch.tensor((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0))
+        nibbles = torch.stack([packed & 0xF, packed >> 4], dim=-1).flatten(-2).long()
+        values = torch.where(nibbles & 0x8 != 0, -1.0, 1.0) * e2m1[nibbles & 0x7]
+        decoded = values * torch.pow(2.0, scales.float() - 127).repeat_interleave(
+            32, dim=1
+        )
+        owned = (ids_cpu >= start) & (ids_cpu < end) & (ids_cpu < table_rows)
+        expected = torch.zeros(caps.max_tokens, 24, 256, dtype=torch.bfloat16)
+        expected[: len(ids_cpu)][owned] = decoded[ids_cpu[owned]].to(torch.bfloat16)
+        assert owned.any()
+        assert torch.equal(out.cpu(), expected.view(caps.max_tokens, 6144))
+    finally:
+        embedding.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_mxfp4_engram_disk_table_is_rejected():
+    geometry = native.build_geometry(base_table_size=19, compressed_vocab_size=32)
+    caps = native.Caps(
+        device="cuda",
+        max_tokens=8,
+        max_seqs=2,
+        max_requests=2,
+        vocab_size=32,
+        layer_id=geometry.layer_ids[0],
+        tp_size=1,
+        tp_rank=0,
+    )
+    with pytest.raises(ValueError, match="MXFP4"):
+        ParallelEngramEmbedding(None, caps, geometry, "disk", packed_fp4=True)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @torch.inference_mode()
 def test_engram_preparation_covers_masked_and_unmasked_graphs(dist_init):

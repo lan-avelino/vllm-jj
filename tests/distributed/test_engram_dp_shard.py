@@ -22,6 +22,7 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
+from tests.kernels.test_engram import _decode_e2m1
 from vllm.config import (
     EngramConfig,
     VllmConfig,
@@ -62,10 +63,13 @@ def _token_counts(dp_size: int) -> tuple[tuple[int, ...], ...]:
     return ((8,) * dp_size, (7, 0, 5, 1)[:dp_size], (7,) * dp_size)
 
 
-def _full_table(rows: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _full_table(rows: int, packed_fp4: bool) -> tuple[torch.Tensor, torch.Tensor]:
     """The unsharded table, identical on every rank."""
     torch.manual_seed(0)
-    weight = (torch.randn(rows, DIM) * 4).to(torch.float8_e4m3fn)
+    if packed_fp4:
+        weight = torch.randint(0, 256, (rows, DIM // 2), dtype=torch.uint8)
+    else:
+        weight = (torch.randn(rows, DIM) * 4).to(torch.float8_e4m3fn)
     scale_inv = torch.randint(120, 134, (rows, DIM // BLOCK), dtype=torch.uint8)
     return weight, scale_inv
 
@@ -82,7 +86,9 @@ def _make_ids(head_sizes: tuple[int, ...], num_tokens: int, seed: int) -> torch.
 
 
 def _reference(weight, scale_inv, ids) -> torch.Tensor:
-    """Dequantized lookup against the whole table."""
+    """Dequantized lookup against the whole table; uint8 means packed E2M1."""
+    if weight.dtype == torch.uint8:
+        weight = _decode_e2m1(weight)
     valid = ids >= 0
     safe_ids = ids.clamp_min(0).long()
     values = torch.nn.functional.embedding(safe_ids, weight).float()
@@ -205,6 +211,19 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
                 n_heads,
                 sequence_parallel,
             )
+        # Packed MXFP4 tables use the same storage modes and DP exchanges.
+        for (cpu_offload, dp_shared_memory), sequence_parallel in product(
+            [(False, False), (True, False), (True, True)],
+            [False, True] if tp_size > 1 else [False],
+        ):
+            _check_table(
+                vllm_config,
+                cpu_offload,
+                dp_shared_memory,
+                7,
+                sequence_parallel,
+                packed_fp4=True,
+            )
     finally:
         cleanup_dist_env_and_memory()
 
@@ -307,7 +326,12 @@ def _check_shared_storage_lifetime_and_failures(failure):
 
 
 def _check_table(
-    vllm_config, cpu_offload, dp_shared_memory, n_heads, sequence_parallel
+    vllm_config,
+    cpu_offload,
+    dp_shared_memory,
+    n_heads,
+    sequence_parallel,
+    packed_fp4=False,
 ):
     parallel = vllm_config.parallel_config
     dp_size, tp_size = parallel.data_parallel_size, parallel.tensor_parallel_size
@@ -344,8 +368,10 @@ def _check_table(
             engram_pad_token_id=0,
             engram_vocab_size=HEAD_SIZES[0],
         )
+        if packed_fp4:
+            config.quantization_config = {"engram_embed_quant": "mxfp4"}
         with set_current_vllm_config(vllm_config):
-            weight, scale_inv = _full_table(rows)
+            weight, scale_inv = _full_table(rows, packed_fp4)
             layout = EngramLayout(config)
             # Stub configuration inputs, not Engram's initialization or execution.
             component_config = SimpleNamespace(
@@ -369,6 +395,11 @@ def _check_table(
                     prefix="model.layers.0.engram",
                 )
             layer = engram.embed_tokens
+            assert layer.packed_fp4 is packed_fp4
+            assert layer.weight.shape[1] == (DIM // 2 if packed_fp4 else DIM)
+            assert layer.weight.dtype == (
+                torch.uint8 if packed_fp4 else torch.float8_e4m3fn
+            )
             if multithread:
                 _load_shared_multithread(layer, weight, scale_inv, load_config)
             else:

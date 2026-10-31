@@ -12,6 +12,7 @@ from b12x.sequence import engram as native
 from b12x.sequence._shared.disk_table import MappedHostAllocation
 
 from vllm.config import get_current_vllm_config
+from vllm.config.engram import get_engram_embed_quant
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -21,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.weight_transfer import copy_weight, get_file_tensor_source
+from vllm.models.deepseek_v41.common.engram import _engram_lookup_kernel
 from vllm.triton_utils import tl, triton
 from vllm.utils.b12x import (
     B12xPreparationUnit,
@@ -76,6 +78,12 @@ class EngramLayout:
         self.projection_tp = (
             engram_config.projection_tp if engram_config is not None else False
         )
+        self.embed_quant = get_engram_embed_quant(config)
+        if self.embed_quant == "mxfp4" and self.table_memory == "disk":
+            raise ValueError(
+                "Disk Engram reads FP8 rows and does not support MXFP4 tables; "
+                "use table_memory 'ram' or 'device'"
+            )
         if (
             self.table_memory == "disk"
             and vc.parallel_config.pipeline_parallel_size != 1
@@ -384,12 +392,7 @@ def _load_table(param, loaded_weight):
     dtype = source.dtype if source is not None else loaded_weight.dtype
     if shape != (param.global_rows, *param.shape[1:]):
         raise ValueError("Engram source must be the unpadded global checkpoint table")
-    dtypes = (
-        (torch.uint8, torch.float8_e8m0fnu)
-        if param.dtype == torch.uint8
-        else (torch.float8_e4m3fn,)
-    )
-    if dtype not in dtypes:
+    if dtype not in param.source_dtypes:
         raise TypeError(f"Invalid Engram table dtype: {dtype}")
     destination = getattr(param, "load_view", param.data)
     start = param.shard_start
@@ -408,10 +411,18 @@ def _load_table(param, loaded_weight):
 
 class ParallelEngramEmbedding(nn.Module):
     def __init__(
-        self, plan, caps, geometry, table_memory="device", *, resident_scales=False
+        self,
+        plan,
+        caps,
+        geometry,
+        table_memory="device",
+        *,
+        resident_scales=False,
+        packed_fp4=False,
     ):
         super().__init__()
         self.plan = plan
+        self.packed_fp4 = packed_fp4
         self.caps = caps
         self.table_rows = geometry.num_embeddings[
             geometry.layer_ids.index(caps.layer_id)
@@ -419,11 +430,14 @@ class ParallelEngramEmbedding(nn.Module):
         self.shard_rows = (self.table_rows + caps.tp_size - 1) // caps.tp_size
         self.shard_start = caps.tp_rank * self.shard_rows
         self.shard_end = (caps.tp_rank + 1) * self.shard_rows
-        self.weight_shape = (self.shard_rows, 256)
+        weight_dtype = torch.uint8 if packed_fp4 else torch.float8_e4m3fn
+        self.weight_shape = (self.shard_rows, 128 if packed_fp4 else 256)
         self.scale_shape = (self.shard_rows, 8)
         self.tp_size = caps.tp_size
         if table_memory not in ("device", "ram", "disk"):
             raise ValueError("Engram table_memory must be device, ram or disk")
+        if packed_fp4 and table_memory == "disk":
+            raise ValueError("Disk Engram does not support MXFP4 tables")
         self.table_memory = table_memory
         self.disk_table = None
         self._disk_sources = []
@@ -437,15 +451,16 @@ class ParallelEngramEmbedding(nn.Module):
             )
             logger.info(
                 "Engram layer %d TP rank %d: allocating %.2f GiB mapped-host "
-                "RAM (packed E4M3 weights and E8M0 scales)",
+                "RAM (packed %s weights and E8M0 scales)",
                 caps.layer_id,
                 caps.tp_rank,
                 nbytes / (1 << 30),
+                "E2M1" if packed_fp4 else "E4M3",
             )
             self._weight_allocation = None
             try:
                 self._weight_allocation = MappedHostAllocation(
-                    self.weight_shape, torch.float8_e4m3fn, caps.device
+                    self.weight_shape, weight_dtype, caps.device
                 )
                 self._scale_allocation = MappedHostAllocation(
                     self.scale_shape, torch.uint8, caps.device
@@ -475,7 +490,7 @@ class ParallelEngramEmbedding(nn.Module):
             self.weight = nn.Parameter(
                 torch.empty(
                     self.weight_shape,
-                    dtype=torch.float8_e4m3fn,
+                    dtype=weight_dtype,
                     device=caps.device,
                 ),
                 requires_grad=False,
@@ -488,15 +503,27 @@ class ParallelEngramEmbedding(nn.Module):
             self.register_parameter("weight", None)
             self.register_parameter("weight_scale_inv", None)
         if table_memory != "disk":
-            for param in (self.weight, self.weight_scale_inv):
+            weight_sources = (
+                (torch.uint8, torch.int8) if packed_fp4 else (torch.float8_e4m3fn,)
+            )
+            scale_sources = (torch.uint8, torch.float8_e8m0fnu)
+            for param, source_dtypes in (
+                (self.weight, weight_sources),
+                (self.weight_scale_inv, scale_sources),
+            ):
                 set_weight_attrs(
                     param,
                     {
                         "weight_loader": _load_table,
                         "global_rows": self.table_rows,
                         "shard_start": self.shard_start,
+                        "source_dtypes": source_dtypes,
                     },
                 )
+        if packed_fp4:
+            self._num_sms = torch.cuda.get_device_properties(
+                caps.device
+            ).multi_processor_count
         self.register_buffer(
             "hashes",
             torch.empty((caps.max_tokens, 24), dtype=torch.int64, device=caps.device),
@@ -612,8 +639,39 @@ class ParallelEngramEmbedding(nn.Module):
             retain_cuda_graph_capture_resource(self)
         native.run_lookup(binding)
 
+    def lookup_packed(self, indices, out):
+        """Decode MXFP4 rows with the vLLM kernel; b12x reads FP8 rows only."""
+        rows = indices.shape[0] * 24
+        if not rows:
+            return
+        if self.mapped_host_nbytes:
+            retain_cuda_graph_capture_resource(self)
+        grid = min(triton.cdiv(rows, 16), self._num_sms)
+        _engram_lookup_kernel[(grid,)](
+            self.weight,
+            self.weight_scale_inv,
+            indices,
+            out,
+            self.shard_start,
+            min(self.shard_end, self.table_rows),
+            rows,
+            indices.stride(0),
+            indices.stride(1),
+            HEAD_START=0,
+            LOCAL_HEADS=24,
+            TOTAL_HEADS=24,
+            DIM=256,
+            QUANT_BLOCK=32,
+            BLOCK_R=16,
+            GRID=grid,
+            PACKED_FP4=True,
+        )
+
     def lookup(self, indices, out):
-        self.lookup_native(indices, out)
+        if self.packed_fp4:
+            self.lookup_packed(indices, out)
+        else:
+            self.lookup_native(indices, out)
 
 
 class Engram(nn.Module):
@@ -641,6 +699,7 @@ class Engram(nn.Module):
             layout.geometry,
             layout.table_memory,
             resident_scales=getattr(layout, "disk_resident_scales", False),
+            packed_fp4=getattr(layout, "embed_quant", "fp8") == "mxfp4",
         )
         self._disk_prepared = False
         self._disk_prepared_tokens = 0
@@ -755,10 +814,17 @@ class Engram(nn.Module):
                 restore=table.close if table is not None else None,
             )
 
-        request = self.embed_tokens.plan.request(
-            name=f"{id(self)}/engram-lookup",
-            prepare_call=make_call,
-            benchmark_call=make_call,
+        # MXFP4 lookups run vLLM's kernel, so there is no b12x call to prepare.
+        lookup_requests = (
+            ()
+            if self.embed_tokens.packed_fp4
+            else (
+                self.embed_tokens.plan.request(
+                    name=f"{id(self)}/engram-lookup",
+                    prepare_call=make_call,
+                    benchmark_call=make_call,
+                ),
+            )
         )
 
         def make_mix_call(state):
@@ -812,19 +878,22 @@ class Engram(nn.Module):
             )
             for masked, plan in self.mix_plans.items()
         )
+        mix_unit = B12xPreparationUnit(
+            name="EngramMix",
+            key=(id(self), workload.max_tokens),
+            requests=mix_requests,
+            stage="weights",
+        )
+        if not lookup_requests:
+            return (mix_unit,)
         return (
             B12xPreparationUnit(
                 name="EngramLookup",
                 key=(id(self), workload.max_tokens),
-                requests=(request,),
+                requests=lookup_requests,
                 stage="weights",
             ),
-            B12xPreparationUnit(
-                name="EngramMix",
-                key=(id(self), workload.max_tokens),
-                requests=mix_requests,
-                stage="weights",
-            ),
+            mix_unit,
         )
 
     def process_weights_after_loading(self):
