@@ -237,6 +237,217 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
     ]
 
 
+_DSV41_NVFP4 = {
+    "moe_quant_algo": "NVFP4",
+    "ignore": ["*.attn.*", "*.ffn.shared_experts.*", "head", "mtp.*"],
+}
+_DSV4_NVFP4_DSPARK = {
+    "moe_quant_algo": "NVFP4",
+    "ignore": ["*.attn.*", "*.ffn.shared_experts.*", "head"],
+}
+
+
+@pytest.mark.parametrize(
+    ("ckpt_quant_cfg", "prefix", "expected"),
+    [
+        pytest.param(_DSV41_NVFP4, "model.layers.1.ffn.experts", "nvfp4", id="target"),
+        pytest.param(
+            _DSV41_NVFP4,
+            "language_model.model.layers.0.ffn.experts",
+            "nvfp4",
+            id="target-vl-prefix",
+        ),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.40.ffn.experts", "mxfp4", id="ignored-mtp0"
+        ),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.42.ffn.experts", "mxfp4", id="ignored-mtp2"
+        ),
+        pytest.param(
+            _DSV4_NVFP4_DSPARK,
+            "model.layers.41.ffn.experts",
+            "nvfp4",
+            id="quantized-mtp1",
+        ),
+        pytest.param(
+            {"moe_quant_algo": "NVFP4"},
+            "model.layers.40.ffn.experts",
+            "nvfp4",
+            id="no-ignore-list",
+        ),
+        pytest.param({}, "model.layers.1.ffn.experts", "mxfp4", id="not-nvfp4"),
+    ],
+)
+def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
+    monkeypatch, ckpt_quant_cfg, prefix, expected
+):
+    """NVFP4 exports keep the routed experts they ``ignore`` in MXFP4, e.g. the
+    bundled DSpark draft (``mtp.*``, built as ``layers.{40 + k}``) of
+    DeepSeek-V4.1-Flash-NVFP4. The ignore list is read from the checkpoint
+    passed to ``from_config``: the current hf_config below carries none."""
+    import vllm.model_executor.layers.quantization.modelopt as modelopt
+    import vllm.models.deepseek_v41.quant_config as dsv41_qc
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    hf_config = SimpleNamespace(
+        expert_dtype="fp4",
+        quantization_config={"moe_quant_algo": ckpt_quant_cfg.get("moe_quant_algo")},
+    )
+    model_config = SimpleNamespace(
+        hf_config=hf_config, hf_text_config=SimpleNamespace(num_hidden_layers=40)
+    )
+    monkeypatch.setattr(
+        dsv41_qc,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=model_config),
+    )
+    monkeypatch.setattr(dsv41_qc, "Mxfp4MoEMethod", lambda moe_config: "mxfp4")
+    monkeypatch.setattr(modelopt, "ModelOptNvFp4FusedMoE", lambda **kwargs: "nvfp4")
+
+    config = dsv41_qc.DeepseekV4FP8Config.from_config(
+        {"quant_method": "fp8", "activation_scheme": "dynamic", **ckpt_quant_cfg}
+    )
+    monkeypatch.setattr(config, "_get_nvfp4_config", lambda: None)
+    layer = RoutedExperts.__new__(RoutedExperts)
+    layer.moe_config = None
+    assert config.get_quant_method(layer, prefix) == expected
+
+
+@pytest.mark.parametrize(
+    ("ckpt_quant_cfg", "prefix", "expected"),
+    [
+        pytest.param(_DSV41_NVFP4, "model.layers.3.ffn.experts", "nvfp4", id="target"),
+        pytest.param(_DSV41_NVFP4, "layers.39.ffn.experts", "nvfp4", id="last-target"),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.40.ffn.experts", "mxfp4", id="draft-mtp0"
+        ),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.42.ffn.experts", "mxfp4", id="draft-mtp2"
+        ),
+        pytest.param({}, "model.layers.3.ffn.experts", "mxfp4", id="mxfp4-target"),
+        pytest.param({}, "model.layers.40.ffn.experts", "mxfp4", id="mxfp4-draft"),
+        pytest.param(
+            {"ignore": _DSV41_NVFP4["ignore"]},
+            "model.layers.3.ffn.experts",
+            "mxfp4",
+            id="ignore-without-nvfp4",
+        ),
+    ],
+)
+def test_deepseek_v41_b12x_config_routes_nvfp4_experts(
+    monkeypatch, ckpt_quant_cfg, prefix, expected
+):
+    """The SM120 DeepSeek-V4.1 config sends main-model experts of a ModelOpt
+    NVFP4 export to ``ModelOptNvFp4FusedMoE`` and keeps the DSpark draft
+    (``mtp.*``) and MXFP4 checkpoints on ``Mxfp4MoEMethod``."""
+    import vllm.model_executor.layers.quantization.modelopt as modelopt
+    import vllm.models.deepseek_v4_1.quant_config as b12x_qc
+    import vllm.models.deepseek_v41.quant_config as shared_qc
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    hf_config = SimpleNamespace(
+        expert_dtype="fp4",
+        quantization_config={"moe_quant_algo": ckpt_quant_cfg.get("moe_quant_algo")},
+    )
+    model_config = SimpleNamespace(
+        hf_config=hf_config, hf_text_config=SimpleNamespace(num_hidden_layers=40)
+    )
+    monkeypatch.setattr(
+        shared_qc,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=model_config),
+    )
+    monkeypatch.setattr(b12x_qc, "Mxfp4MoEMethod", lambda moe_config: "mxfp4")
+    monkeypatch.setattr(modelopt, "ModelOptNvFp4FusedMoE", lambda **kwargs: "nvfp4")
+
+    config = b12x_qc.DeepseekV41FP8Config.from_config(
+        {"quant_method": "deepseek_v41_fp8", "activation_scheme": "dynamic"}
+        | ckpt_quant_cfg
+    )
+    monkeypatch.setattr(config, "_get_nvfp4_config", lambda: None)
+    layer = RoutedExperts.__new__(RoutedExperts)
+    layer.moe_config = None
+    assert config.get_quant_method(layer, prefix) == expected
+
+
+def test_deepseek_v41_b12x_config_keeps_modelopt_ignore_out_of_ignored_layers():
+    """``ignore`` is a ModelOpt expert filter, not a dense-layer skip list: the
+    ``*.attn.*`` and shared-expert linears keep their block-32 FP8 method."""
+    import vllm.models.deepseek_v4_1.quant_config as b12x_qc
+
+    config = b12x_qc.DeepseekV41FP8Config.from_config(
+        {
+            "quant_method": "deepseek_v41_fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [32, 32],
+            "scale_fmt": "ue8m0",
+            **_DSV41_NVFP4,
+        }
+    )
+    assert config.get_name() == "deepseek_v41_fp8"
+    assert config.ignored_layers == []
+    assert config.weight_block_size == [32, 32]
+    assert config.is_scale_e8m0
+    assert config._modelopt_ignore == tuple(_DSV41_NVFP4["ignore"])
+
+
+def test_deepseek_v41_nvfp4_export_selects_b12x_config_after_sm120_rewrite():
+    """``DeepseekV41ForCausalLMConfig`` rewrites ``fp8`` to ``deepseek_v41_fp8``
+    on SM120 before overrides are probed, so the generic V4 config declines and
+    the b12x config, which the model requires, is the one selected."""
+    import vllm.models.deepseek_v4_1.quant_config as b12x_qc
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
+
+    hf_config = SimpleNamespace(model_type="deepseek_v41")
+    hf_quant_cfg = {"quant_method": "deepseek_v41_fp8", **_DSV41_NVFP4}
+    assert (
+        DeepseekV4FP8Config.override_quantization_method(
+            hf_quant_cfg, None, hf_config=hf_config
+        )
+        is None
+    )
+    assert (
+        b12x_qc.DeepseekV41FP8Config.override_quantization_method(
+            hf_quant_cfg, None, hf_config=hf_config
+        )
+        == "deepseek_v41_fp8"
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")
+def test_deepseek_v41_mapper_keeps_nvfp4_expert_names_and_maps_mxfp4_scales():
+    """NVFP4 expert tensors already carry ``weight_scale``, ``weight_scale_2``
+    and ``input_scale``; only the ``.scale`` keys of the MXFP4 experts and the
+    block-32 FP8 linears are renamed, and the bundled ``mtp.*`` is dropped."""
+    from vllm.models.deepseek_v41.nvidia import model as model_module
+
+    mapper = model_module._make_deepseek_v4_weights_mapper("fp4", "weight_scale_inv")
+    weight = torch.empty(0)
+    expert = "layers.3.ffn.experts.0.w1"
+    names = [
+        f"{expert}.weight",
+        f"{expert}.weight_scale",
+        f"{expert}.weight_scale_2",
+        f"{expert}.input_scale",
+        "layers.3.ffn.experts.0.w2.weight_scale",
+        "layers.4.ffn.experts.1.w1.scale",
+        "layers.3.ffn.shared_experts.w1.scale",
+        "layers.3.attn.wq_a.scale",
+        "mtp.0.ffn.experts.0.w1.scale",
+    ]
+    mapped = [name for name, _ in mapper.apply([(n, weight) for n in names])]
+    assert mapped == [
+        "model.layers.3.ffn.experts.0.w1.weight",
+        "model.layers.3.ffn.experts.0.w1.weight_scale",
+        "model.layers.3.ffn.experts.0.w1.weight_scale_2",
+        "model.layers.3.ffn.experts.0.w1.input_scale",
+        "model.layers.3.ffn.experts.0.w2.weight_scale",
+        "model.layers.4.ffn.experts.1.w1.weight_scale",
+        "model.layers.3.ffn.shared_experts.w1.weight_scale_inv",
+        "model.layers.3.attn.wq_a.weight_scale_inv",
+    ]
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
 @pytest.mark.parametrize(
